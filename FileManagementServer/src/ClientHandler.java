@@ -124,8 +124,10 @@ public class ClientHandler extends Thread {
                             String date = new java.text.SimpleDateFormat("dd MMM yyyy HH:mm")
                                     .format(new java.util.Date(f.lastModified()));
                             if (f.isDirectory()) {
+                                long folderSize = getFolderSize(f);
                                 sb.append("DIR:").append(f.getName())
-                                        .append(":—:").append(date).append(",");
+                                        .append(":").append(formatSize(folderSize))
+                                        .append(":").append(date).append(",");
                             } else {
                                 sb.append("FILE:").append(f.getName())
                                         .append(":").append(size)
@@ -231,8 +233,11 @@ public class ClientHandler extends Thread {
                             String date = new java.text.SimpleDateFormat("dd MMM yyyy HH:mm")
                                     .format(new java.util.Date(f.lastModified()));
                             if (f.isDirectory()) {
+                                long folderSize = getFolderSize(f);
+                                String folderSizeStr = formatSize(folderSize);
                                 sb.append("DIR:").append(f.getName())
-                                        .append(":—:").append(date).append(",");
+                                        .append(":").append(folderSizeStr)
+                                        .append(":").append(date).append(",");
                             } else {
                                 sb.append("FILE:").append(f.getName())
                                         .append(":").append(size)
