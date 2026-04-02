@@ -714,28 +714,108 @@ public class ClientHandler extends Thread {
                     out.writeUTF(buildFileListResponse(dir, false));
 
 
-                } else if (message.startsWith("UPLOAD_PROFILE ")) {
+                } else if (message.startsWith("SETFILEDESCRIPTION ")) {
                     if (!isLoggedIn(out)) continue;
 
-                    long fileSize;
-                    try {
-                        fileSize = Long.parseLong(message.substring("UPLOAD_PROFILE ".length()).trim());
-                    } catch (NumberFormatException e) {
-                        out.writeUTF("ERROR Invalid file size");
+                    String[] parts = message.substring("SETFILEDESCRIPTION ".length()).split("\\|", 3);
+                    if (parts.length < 3) {
+                        out.writeUTF("ERROR Invalid command");
                         continue;
                     }
 
-                    if (fileSize > MAX_UPLOAD_SIZE) {
-                        out.writeUTF("ERROR File too large (max 500MB)");
+                    String groupId = parts[0].trim();
+                    String fileName = parts[1].trim();
+                    String description = parts[2].trim();
+
+                    if (!GroupManager.groupExists(groupId)) { out.writeUTF("ERROR Group not found"); continue; }
+                    if (!GroupManager.isMember(groupId, loggedInUser)) { out.writeUTF("ERROR Not authorized"); continue; }
+
+                    File metaDir = new File(BASE_DIR + "/groups/" + groupId + "/.meta");
+                    metaDir.mkdirs();
+
+                    File metaFile = new File(metaDir, fileName + ".txt");
+                    List<String> existingComments = new ArrayList<>();
+
+                    if (metaFile.exists()) {
+                        try (BufferedReader reader = new BufferedReader(new FileReader(metaFile))) {
+                            String line;
+                            while ((line = reader.readLine()) != null) {
+                                if (line.startsWith("comment:")) existingComments.add(line);
+                            }
+                        }
+                    }
+
+                    try (PrintWriter writer = new PrintWriter(new FileWriter(metaFile, false))) {
+                        writer.println("description:" + description);
+                        for (String c : existingComments) writer.println(c);
+                    }
+
+                    out.writeUTF("SETFILEDESCRIPTION_SUCCESS");
+
+                } else if (message.startsWith("ADDCOMMENT ")) {
+                    if (!isLoggedIn(out)) continue;
+
+                    String[] parts = message.substring("ADDCOMMENT ".length()).split("\\|", 3);
+                    if (parts.length < 3) {
+                        out.writeUTF("ERROR Invalid command");
                         continue;
                     }
 
-                    File profileDir = new File(BASE_DIR + "/profile_pics");
-                    profileDir.mkdirs();
+                    String groupId = parts[0].trim();
+                    String fileName = parts[1].trim();
+                    String comment = parts[2].trim();
 
-                    File destFile = new File(profileDir, loggedInUser + ".png");
-                    receiveFile(in, destFile, fileSize);
-                    out.writeUTF("UPLOAD_PROFILE_SUCCESS");
+                    if (!GroupManager.groupExists(groupId)) { out.writeUTF("ERROR Group not found"); continue; }
+                    if (!GroupManager.isMember(groupId, loggedInUser)) { out.writeUTF("ERROR Not authorized"); continue; }
+
+                    File metaDir = new File(BASE_DIR + "/groups/" + groupId + "/.meta");
+                    metaDir.mkdirs();
+
+                    File metaFile = new File(metaDir, fileName + ".txt");
+                    if (!metaFile.exists()) {
+                        try (PrintWriter writer = new PrintWriter(new FileWriter(metaFile))) {
+                            writer.println("description:");
+                        }
+                    }
+
+                    try (PrintWriter writer = new PrintWriter(new FileWriter(metaFile, true))) {
+                        writer.println("comment:" + loggedInUser + "|" + comment);
+                    }
+
+                    out.writeUTF("COMMENT_SUCCESS");
+
+                } else if (message.startsWith("GETFILEDISCUSSION ")) {
+                    if (!isLoggedIn(out)) continue;
+
+                    String[] parts = message.substring("GETFILEDISCUSSION ".length()).split("\\|", 2);
+                    if (parts.length < 2) {
+                        out.writeUTF("ERROR Invalid command");
+                        continue;
+                    }
+
+                    String groupId = parts[0].trim();
+                    String fileName = parts[1].trim();
+
+                    if (!GroupManager.groupExists(groupId)) { out.writeUTF("ERROR Group not found"); continue; }
+                    if (!GroupManager.isMember(groupId, loggedInUser)) { out.writeUTF("ERROR Not authorized"); continue; }
+
+                    File metaFile = new File(BASE_DIR + "/groups/" + groupId + "/.meta/" + fileName + ".txt");
+                    if (!metaFile.exists()) {
+                        out.writeUTF("EMPTY");
+                        continue;
+                    }
+
+                    StringBuilder sb = new StringBuilder();
+                    try (BufferedReader reader = new BufferedReader(new FileReader(metaFile))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            sb.append(line).append(";;");
+                        }
+                    }
+
+                    String result = sb.toString();
+                    if (result.endsWith(";;")) result = result.substring(0, result.length() - 2);
+                    out.writeUTF(result.isEmpty() ? "EMPTY" : result);
 
                 } else if (message.startsWith("DOWNLOAD_PROFILE")) {
                     if (!isLoggedIn(out)) continue;
@@ -747,39 +827,6 @@ public class ClientHandler extends Thread {
                     }
 
                     sendFile(out, file);
-
-                } else if (message.startsWith("UPLOAD_PROFILE_STYLE ")) {
-                    if (!isLoggedIn(out)) continue;
-
-                    String style = message.substring("UPLOAD_PROFILE_STYLE ".length()).trim();
-                    if (style.isEmpty()) {
-                        out.writeUTF("ERROR Invalid style");
-                        continue;
-                    }
-
-                    File profileDir = new File(BASE_DIR + "/profile_pics");
-                    profileDir.mkdirs();
-
-                    File styleFile = new File(profileDir, loggedInUser + ".style.txt");
-                    try (PrintWriter writer = new PrintWriter(new FileWriter(styleFile))) {
-                        writer.println(style);
-                    }
-
-                    out.writeUTF("UPLOAD_PROFILE_STYLE_SUCCESS");
-
-                } else if (message.startsWith("DOWNLOAD_PROFILE_STYLE")) {
-                    if (!isLoggedIn(out)) continue;
-
-                    File styleFile = new File(BASE_DIR + "/profile_pics/" + loggedInUser + ".style.txt");
-                    if (!styleFile.exists() || styleFile.isDirectory()) {
-                        out.writeUTF("STYLE_DEFAULT");
-                        continue;
-                    }
-
-                    try (BufferedReader reader = new BufferedReader(new FileReader(styleFile))) {
-                        String style = reader.readLine();
-                        out.writeUTF(style == null || style.trim().isEmpty() ? "STYLE_DEFAULT" : style.trim());
-                    }
 
                 } else {
                     out.writeUTF(loggedInUser == null ? "Please login first." : "Unknown command.");
