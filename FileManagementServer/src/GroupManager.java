@@ -9,6 +9,10 @@ public class GroupManager {
     private static final String MEMBERS_FILE = "group_members.txt";
     private static final String GROUPS_BASE_DIR = "server_files/groups";
 
+    // Locks for concurrent file access
+    private static final Object GROUPS_LOCK = new Object();
+    private static final Object MEMBERS_LOCK = new Object();
+
     public static class GroupInfo {
         public String groupId;
         public String groupName;
@@ -34,10 +38,12 @@ public class GroupManager {
 
         String groupId = UUID.randomUUID().toString();
 
-        try (PrintWriter writer = new PrintWriter(new FileWriter(GROUPS_FILE, true))) {
-            writer.println(groupId + "|" + groupName + "|" + owner);
-        } catch (IOException e) {
-            return "ERROR Could not create group";
+        synchronized (GROUPS_LOCK) {
+            try (PrintWriter writer = new PrintWriter(new FileWriter(GROUPS_FILE, true))) {
+                writer.println(groupId + "|" + groupName + "|" + owner);
+            } catch (IOException e) {
+                return "ERROR Could not create group";
+            }
         }
 
         boolean ownerAdded = addMember(groupId, owner);
@@ -55,11 +61,13 @@ public class GroupManager {
         if (groupId == null || username == null) return false;
         if (isMember(groupId, username)) return true;
 
-        try (PrintWriter writer = new PrintWriter(new FileWriter(MEMBERS_FILE, true))) {
-            writer.println(groupId + "|" + username);
-            return true;
-        } catch (IOException e) {
-            return false;
+        synchronized (MEMBERS_LOCK) {
+            try (PrintWriter writer = new PrintWriter(new FileWriter(MEMBERS_FILE, true))) {
+                writer.println(groupId + "|" + username);
+                return true;
+            } catch (IOException e) {
+                return false;
+            }
         }
     }
 
@@ -67,18 +75,20 @@ public class GroupManager {
         File file = new File(MEMBERS_FILE);
         if (!file.exists()) return false;
 
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split("\\|");
-                if (parts.length == 2 &&
-                        parts[0].equals(groupId) &&
-                        parts[1].equals(username)) {
-                    return true;
+        synchronized (MEMBERS_LOCK) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String[] parts = line.split("\\|", 2);
+                    if (parts.length == 2 &&
+                            parts[0].trim().equals(groupId) &&
+                            parts[1].trim().equals(username)) {
+                        return true;
+                    }
                 }
+            } catch (IOException e) {
+                System.err.println("Error checking group membership: " + e.getMessage());
             }
-        } catch (IOException e) {
-            System.out.println("Error checking group membership: " + e.getMessage());
         }
 
         return false;
@@ -97,16 +107,18 @@ public class GroupManager {
         File file = new File(GROUPS_FILE);
         if (!file.exists()) return null;
 
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split("\\|");
-                if (parts.length == 3 && parts[0].equals(groupId)) {
-                    return new GroupInfo(parts[0], parts[1], parts[2]);
+        synchronized (GROUPS_LOCK) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String[] parts = line.split("\\|", 3);
+                    if (parts.length == 3 && parts[0].trim().equals(groupId)) {
+                        return new GroupInfo(parts[0].trim(), parts[1].trim(), parts[2].trim());
+                    }
                 }
+            } catch (IOException e) {
+                System.err.println("Error loading group: " + e.getMessage());
             }
-        } catch (IOException e) {
-            System.out.println("Error loading group: " + e.getMessage());
         }
 
         return null;
@@ -118,22 +130,24 @@ public class GroupManager {
         File file = new File(GROUPS_FILE);
         if (!file.exists()) return groups;
 
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split("\\|");
-                if (parts.length == 3) {
-                    String groupId = parts[0];
-                    String groupName = parts[1];
-                    String owner = parts[2];
+        synchronized (GROUPS_LOCK) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String[] parts = line.split("\\|", 3);
+                    if (parts.length == 3) {
+                        String groupId = parts[0].trim();
+                        String groupName = parts[1].trim();
+                        String owner = parts[2].trim();
 
-                    if (isMember(groupId, username)) {
-                        groups.add(new GroupInfo(groupId, groupName, owner));
+                        if (isMember(groupId, username)) {
+                            groups.add(new GroupInfo(groupId, groupName, owner));
+                        }
                     }
                 }
+            } catch (IOException e) {
+                System.err.println("Error reading groups: " + e.getMessage());
             }
-        } catch (IOException e) {
-            System.out.println("Error reading groups: " + e.getMessage());
         }
 
         return groups;

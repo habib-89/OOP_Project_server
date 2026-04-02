@@ -11,6 +11,12 @@ public class ClientHandler extends Thread {
     private String loggedInUser = null;
     private static final String BASE_DIR = "server_files";
 
+    // 500 MB upload limit
+    private static final long MAX_UPLOAD_SIZE = 500L * 1024 * 1024;
+
+    // Lock for shared_files.txt concurrent access
+    private static final Object SHARED_FILES_LOCK = new Object();
+
     public ClientHandler(Socket socket) {
         this.socket = socket;
     }
@@ -19,12 +25,18 @@ public class ClientHandler extends Thread {
         return new File(BASE_DIR + "/" + loggedInUser);
     }
 
+    // FIX: use getCanonicalPath() instead of getAbsolutePath() to prevent path traversal
     private File resolvePath(String relativePath) {
-        File resolved = new File(getUserRoot(), relativePath);
-        if (!resolved.getAbsolutePath().startsWith(getUserRoot().getAbsolutePath())) {
+        try {
+            File root = getUserRoot().getCanonicalFile();
+            File resolved = new File(root, relativePath).getCanonicalFile();
+            if (!resolved.getPath().startsWith(root.getPath())) {
+                return null; // Path traversal attempt blocked
+            }
+            return resolved;
+        } catch (IOException e) {
             return null;
         }
-        return resolved;
     }
 
     private File getGroupRoot(String groupId) {
@@ -32,15 +44,18 @@ public class ClientHandler extends Thread {
     }
 
     private File resolveGroupPath(String groupId, String relativePath) {
-        File root = getGroupRoot(groupId);
-        File resolved = (relativePath == null || relativePath.trim().isEmpty())
-                ? root
-                : new File(root, relativePath);
-
-        if (!resolved.getAbsolutePath().startsWith(root.getAbsolutePath())) {
+        try {
+            File root = getGroupRoot(groupId).getCanonicalFile();
+            File resolved = (relativePath == null || relativePath.trim().isEmpty())
+                    ? root
+                    : new File(root, relativePath).getCanonicalFile();
+            if (!resolved.getPath().startsWith(root.getPath())) {
+                return null;
+            }
+            return resolved;
+        } catch (IOException e) {
             return null;
         }
-        return resolved;
     }
 
     @Override
@@ -54,8 +69,10 @@ public class ClientHandler extends Thread {
             while ((message = in.readUTF()) != null) {
                 System.out.println("Client [" + loggedInUser + "]: " + message);
 
-                if (message.startsWith("LOGIN")) {
-                    String[] parts = message.split(" ");
+                if (message.startsWith("LOGIN ")) {
+                    // FIX: split with limit 3 to handle passwords with spaces
+                    String[] parts = message.split(" ", 3);
+                    if (parts.length < 3) { out.writeUTF("FAIL"); continue; }
                     String username = parts[1];
                     String password = parts[2];
 
@@ -67,8 +84,10 @@ public class ClientHandler extends Thread {
                         out.writeUTF("FAIL");
                     }
 
-                } else if (message.startsWith("REGISTER")) {
-                    String[] parts = message.split(" ");
+                } else if (message.startsWith("REGISTER ")) {
+                    // FIX: split with limit 3
+                    String[] parts = message.split(" ", 3);
+                    if (parts.length < 3) { out.writeUTF("REGISTER_FAIL Invalid request"); continue; }
                     String username = parts[1];
                     String password = parts[2];
 
@@ -76,14 +95,11 @@ public class ClientHandler extends Thread {
                         out.writeUTF("REGISTER_SUCCESS");
                         System.out.println("New user registered: " + username);
                     } else {
-                        out.writeUTF("REGISTER_FAIL Username already exists");
+                        out.writeUTF("REGISTER_FAIL Username already exists or invalid");
                     }
 
                 } else if (message.startsWith("LISTUSERS")) {
-                    if (loggedInUser == null || !loggedInUser.equals("admin")) {
-                        out.writeUTF("ERROR Unauthorized");
-                        continue;
-                    }
+                    if (!isAdmin(out)) continue;
 
                     List<String> allUsers = AuthService.getAllUsers();
                     StringBuilder sb = new StringBuilder();
@@ -92,20 +108,14 @@ public class ClientHandler extends Thread {
                         long size = getFolderSize(userFolder);
                         sb.append(u).append(":").append(formatSize(size)).append(",");
                     }
-
                     String result = sb.toString();
-                    if (result.endsWith(",")) {
-                        result = result.substring(0, result.length() - 1);
-                    }
+                    if (result.endsWith(",")) result = result.substring(0, result.length() - 1);
                     out.writeUTF(result.isEmpty() ? "EMPTY" : result);
 
-                } else if (message.startsWith("DELETEUSER")) {
-                    if (loggedInUser == null || !loggedInUser.equals("admin")) {
-                        out.writeUTF("ERROR Unauthorized");
-                        continue;
-                    }
+                } else if (message.startsWith("DELETEUSER ")) {
+                    if (!isAdmin(out)) continue;
 
-                    String targetUser = message.substring(11).trim();
+                    String targetUser = message.substring("DELETEUSER ".length()).trim();
 
                     if (targetUser.equals("admin")) {
                         out.writeUTF("ERROR Cannot delete admin");
@@ -121,13 +131,10 @@ public class ClientHandler extends Thread {
                         out.writeUTF("ERROR Could not delete user");
                     }
 
-                } else if (message.startsWith("VIEWUSERFILES")) {
-                    if (loggedInUser == null || !loggedInUser.equals("admin")) {
-                        out.writeUTF("ERROR Unauthorized");
-                        continue;
-                    }
+                } else if (message.startsWith("VIEWUSERFILES ")) {
+                    if (!isAdmin(out)) continue;
 
-                    String targetUser = message.substring(14).trim();
+                    String targetUser = message.substring("VIEWUSERFILES ".length()).trim();
                     File userFolder = new File(BASE_DIR + "/" + targetUser);
 
                     if (!userFolder.exists()) {
@@ -135,44 +142,10 @@ public class ClientHandler extends Thread {
                         continue;
                     }
 
-                    StringBuilder sb = new StringBuilder();
-                    File[] files = userFolder.listFiles();
-                    if (files != null) {
-                        for (File f : files) {
-                            if (f.getName().equals(".recycle")) continue;
-<<<<<<< HEAD
-                            String date = new java.text.SimpleDateFormat("dd MMM yyyy HH:mm")
-                                    .format(new java.util.Date(f.lastModified()));
-=======
-                            if (f.getName().equals("groups")) continue;
-
-                            String size = f.isDirectory() ? "—" : formatSize(f.length());
-                            String date = new SimpleDateFormat("dd MMM yyyy HH:mm")
-                                    .format(new Date(f.lastModified()));
-
->>>>>>> c27a6655e5de88921119c7712422b73459209595
-                            if (f.isDirectory()) {
-                                long folderSize = getFolderSize(f);
-                                sb.append("DIR:").append(f.getName())
-                                        .append(":").append(formatSize(folderSize))
-                                        .append(":").append(date).append(",");
-                            } else {
-                                sb.append("FILE:").append(f.getName())
-                                        .append(":").append(formatSize(f.length()))
-                                        .append(":").append(date).append(",");
-                            }
-                        }
-                    }
-
-                    String result = sb.toString();
-                    if (result.endsWith(",")) result = result.substring(0, result.length() - 1);
-                    out.writeUTF(result.isEmpty() ? "EMPTY" : result);
+                    out.writeUTF(buildFileListResponse(userFolder, true));
 
                 } else if (message.startsWith("LISTBIN")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                    if (!isLoggedIn(out)) continue;
 
                     File recycleDir = new File(getUserRoot(), ".recycle");
                     if (!recycleDir.exists() || recycleDir.listFiles() == null) {
@@ -185,18 +158,14 @@ public class ClientHandler extends Thread {
                     if (files != null) {
                         for (File f : files) sb.append(f.getName()).append(",");
                     }
-
                     String result = sb.toString();
                     if (result.endsWith(",")) result = result.substring(0, result.length() - 1);
                     out.writeUTF(result.isEmpty() ? "EMPTY" : result);
 
-                } else if (message.startsWith("RESTORE")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("RESTORE ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String recycleName = message.substring(8).trim();
+                    String recycleName = message.substring("RESTORE ".length()).trim();
                     File recycleDir = new File(getUserRoot(), ".recycle");
                     File recycleFile = new File(recycleDir, recycleName);
 
@@ -205,32 +174,51 @@ public class ClientHandler extends Thread {
                         continue;
                     }
 
-                    String originalPath = recycleName.substring(0,
-                            recycleName.lastIndexOf("##")).replace("__", "/");
+                    // FIX: validate recycled file is inside recycle dir
+                    try {
+                        if (!recycleFile.getCanonicalPath().startsWith(recycleDir.getCanonicalPath())) {
+                            out.writeUTF("ERROR Invalid path");
+                            continue;
+                        }
+                    } catch (IOException e) {
+                        out.writeUTF("ERROR Invalid path");
+                        continue;
+                    }
+
+                    int sepIdx = recycleName.lastIndexOf("##");
+                    if (sepIdx == -1) { out.writeUTF("ERROR Invalid recycle name"); continue; }
+
+                    String originalPath = recycleName.substring(0, sepIdx).replace("__", "/");
+                    String fileName = recycleName.substring(sepIdx + 2);
                     int lastSlash = originalPath.lastIndexOf("/");
                     String dirPart = lastSlash == -1 ? "" : originalPath.substring(0, lastSlash);
-                    String fileName = recycleName.substring(recycleName.lastIndexOf("##") + 2);
-
                     File restoreDir = dirPart.isEmpty() ? getUserRoot() : new File(getUserRoot(), dirPart);
                     restoreDir.mkdirs();
                     File restoreDest = new File(restoreDir, fileName);
 
                     if (recycleFile.renameTo(restoreDest)) {
                         out.writeUTF("RESTORE_SUCCESS");
-                        System.out.println("Restored: " + restoreDest.getPath());
                     } else {
                         out.writeUTF("ERROR Could not restore file");
                     }
 
-                } else if (message.startsWith("PERMANENTDELETE")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("PERMANENTDELETE ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String recycleName = message.substring(16).trim();
+                    String recycleName = message.substring("PERMANENTDELETE ".length()).trim();
                     File recycleDir = new File(getUserRoot(), ".recycle");
                     File recycleFile = new File(recycleDir, recycleName);
+
+                    // Validate it's inside recycle dir
+                    try {
+                        if (!recycleFile.getCanonicalPath().startsWith(recycleDir.getCanonicalPath())) {
+                            out.writeUTF("ERROR Invalid path");
+                            continue;
+                        }
+                    } catch (IOException e) {
+                        out.writeUTF("ERROR Invalid path");
+                        continue;
+                    }
 
                     if (!recycleFile.exists()) {
                         out.writeUTF("ERROR File not found");
@@ -244,12 +232,10 @@ public class ClientHandler extends Thread {
                     }
 
                 } else if (message.startsWith("LISTDIR")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                    if (!isLoggedIn(out)) continue;
 
-                    String dirPath = message.length() > 8 ? message.substring(8).trim() : "";
+                    String dirPath = message.length() > "LISTDIR".length()
+                            ? message.substring("LISTDIR".length()).trim() : "";
                     File dir = resolvePath(dirPath);
 
                     if (dir == null || !dir.exists() || !dir.isDirectory()) {
@@ -257,53 +243,15 @@ public class ClientHandler extends Thread {
                         continue;
                     }
 
-                    StringBuilder sb = new StringBuilder();
-                    File[] contents = dir.listFiles();
+                    out.writeUTF(buildFileListResponse(dir, false));
 
-                    if (contents != null) {
-                        for (File f : contents) {
-                            if (f.getName().equals(".recycle")) continue;
-<<<<<<< HEAD
-                            String date = new java.text.SimpleDateFormat("dd MMM yyyy HH:mm")
-                                    .format(new java.util.Date(f.lastModified()));
-=======
-                            if (f.getName().equals("groups")) continue;
+                } else if (message.startsWith("MKDIR ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                            String size = f.isDirectory() ? "—" : formatSize(f.length());
-                            String date = new SimpleDateFormat("dd MMM yyyy HH:mm")
-                                    .format(new Date(f.lastModified()));
-
->>>>>>> c27a6655e5de88921119c7712422b73459209595
-                            if (f.isDirectory()) {
-                                long folderSize = getFolderSize(f);
-                                sb.append("DIR:").append(f.getName())
-                                        .append(":").append(formatSize(folderSize))
-                                        .append(":").append(date).append(",");
-                            } else {
-                                sb.append("FILE:").append(f.getName())
-                                        .append(":").append(formatSize(f.length()))
-                                        .append(":").append(date).append(",");
-                            }
-                        }
-                    }
-
-                    String result = sb.toString();
-                    if (result.endsWith(",")) result = result.substring(0, result.length() - 1);
-                    out.writeUTF(result.isEmpty() ? "EMPTY" : result);
-
-                } else if (message.startsWith("MKDIR")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
-
-                    String path = message.substring(6).trim();
+                    String path = message.substring("MKDIR ".length()).trim();
                     File dir = resolvePath(path);
 
-                    if (dir == null) {
-                        out.writeUTF("ERROR Invalid path");
-                        continue;
-                    }
+                    if (dir == null) { out.writeUTF("ERROR Invalid path"); continue; }
 
                     if (dir.exists()) {
                         out.writeUTF("ERROR Folder already exists");
@@ -313,13 +261,10 @@ public class ClientHandler extends Thread {
                         out.writeUTF("ERROR Could not create folder");
                     }
 
-                } else if (message.startsWith("DELETEDIR")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("DELETEDIR ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String path = message.substring(10).trim();
+                    String path = message.substring("DELETEDIR ".length()).trim();
                     File dir = resolvePath(path);
 
                     if (dir == null || !dir.exists()) {
@@ -333,14 +278,12 @@ public class ClientHandler extends Thread {
                         out.writeUTF("ERROR Could not delete folder");
                     }
 
-                } else if (message.startsWith("RENAMEDIR")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("RENAMEDIR ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String content = message.substring(10).trim();
-                    String[] paths = content.split("\\|");
+                    String content = message.substring("RENAMEDIR ".length()).trim();
+                    String[] paths = content.split("\\|", 2);
+                    if (paths.length < 2) { out.writeUTF("ERROR Invalid command"); continue; }
 
                     File oldFile = resolvePath(paths[0].trim());
                     File newFile = resolvePath(paths[1].trim());
@@ -356,14 +299,12 @@ public class ClientHandler extends Thread {
                         out.writeUTF("ERROR Could not rename");
                     }
 
-                } else if (message.startsWith("MOVEFILE")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("MOVEFILE ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String content = message.substring(9).trim();
-                    String[] paths = content.split("\\|");
+                    String content = message.substring("MOVEFILE ".length()).trim();
+                    String[] paths = content.split("\\|", 2);
+                    if (paths.length < 2) { out.writeUTF("ERROR Invalid command"); continue; }
 
                     File srcFile = resolvePath(paths[0].trim());
                     File destDir = resolvePath(paths[1].trim());
@@ -379,146 +320,93 @@ public class ClientHandler extends Thread {
                     }
 
                     File destFile = new File(destDir, srcFile.getName());
-<<<<<<< HEAD
-=======
-
->>>>>>> c27a6655e5de88921119c7712422b73459209595
                     if (srcFile.renameTo(destFile)) {
                         out.writeUTF("MOVEFILE_SUCCESS");
                     } else {
                         out.writeUTF("ERROR Could not move file");
                     }
 
-                } else if (message.startsWith("UPLOADGROUP")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("UPLOADGROUP ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String afterCommand = message.substring(12).trim();
+                    String afterCommand = message.substring("UPLOADGROUP ".length()).trim();
                     int lastSpace = afterCommand.lastIndexOf(" ");
-<<<<<<< HEAD
-                    String filePath = afterCommand.substring(0, lastSpace);
-=======
-                    if (lastSpace == -1) {
-                        out.writeUTF("ERROR Invalid command");
-                        continue;
-                    }
+                    if (lastSpace == -1) { out.writeUTF("ERROR Invalid command"); continue; }
 
                     String leftPart = afterCommand.substring(0, lastSpace);
->>>>>>> c27a6655e5de88921119c7712422b73459209595
-                    long fileSize = Long.parseLong(afterCommand.substring(lastSpace + 1).trim());
-
-                    String[] parts = leftPart.split("\\|", 2);
-                    if (parts.length < 2) {
-                        out.writeUTF("ERROR Invalid command");
+                    long fileSize;
+                    try {
+                        fileSize = Long.parseLong(afterCommand.substring(lastSpace + 1).trim());
+                    } catch (NumberFormatException e) {
+                        out.writeUTF("ERROR Invalid file size");
                         continue;
                     }
+
+                    // FIX: enforce upload size limit
+                    if (fileSize > MAX_UPLOAD_SIZE) {
+                        out.writeUTF("ERROR File too large (max 500MB)");
+                        continue;
+                    }
+
+                    String[] parts = leftPart.split("\\|", 2);
+                    if (parts.length < 2) { out.writeUTF("ERROR Invalid command"); continue; }
 
                     String groupId = parts[0].trim();
                     String filePath = parts[1].trim();
 
-                    if (!GroupManager.groupExists(groupId)) {
-                        out.writeUTF("ERROR Group not found");
-                        continue;
-                    }
-
-                    if (!GroupManager.isMember(groupId, loggedInUser)) {
-                        out.writeUTF("ERROR Not authorized");
-                        continue;
-                    }
+                    if (!GroupManager.groupExists(groupId)) { out.writeUTF("ERROR Group not found"); continue; }
+                    if (!GroupManager.isMember(groupId, loggedInUser)) { out.writeUTF("ERROR Not authorized"); continue; }
 
                     File destFile = resolveGroupPath(groupId, filePath);
-                    if (destFile == null) {
-                        out.writeUTF("ERROR Invalid path");
-                        continue;
-                    }
+                    if (destFile == null) { out.writeUTF("ERROR Invalid path"); continue; }
 
                     destFile.getParentFile().mkdirs();
-
-                    byte[] buffer = new byte[4096];
-                    long remaining = fileSize;
-<<<<<<< HEAD
-                    FileOutputStream fos = new FileOutputStream(destFile);
-                    while (remaining > 0) {
-                        int read = in.read(buffer, 0, (int) Math.min(buffer.length, remaining));
-                        fos.write(buffer, 0, read);
-                        remaining -= read;
-                    }
-                    fos.close();
-=======
-
-                    try (FileOutputStream fos = new FileOutputStream(destFile)) {
-                        while (remaining > 0) {
-                            int read = in.read(buffer, 0, (int) Math.min(buffer.length, remaining));
-                            fos.write(buffer, 0, read);
-                            remaining -= read;
-                        }
-                    }
-
+                    receiveFile(in, destFile, fileSize);
                     out.writeUTF("UPLOADGROUP_SUCCESS");
                     System.out.println("Group file saved: " + destFile.getPath());
 
-                } else if (message.startsWith("UPLOAD")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
+                } else if (message.startsWith("UPLOAD ")) {
+                    if (!isLoggedIn(out)) continue;
+
+                    String afterCommand = message.substring("UPLOAD ".length());
+                    int lastSpace = afterCommand.lastIndexOf(" ");
+                    if (lastSpace == -1) { out.writeUTF("ERROR Invalid command"); continue; }
+
+                    String filePath = afterCommand.substring(0, lastSpace).trim();
+                    long fileSize;
+                    try {
+                        fileSize = Long.parseLong(afterCommand.substring(lastSpace + 1).trim());
+                    } catch (NumberFormatException e) {
+                        out.writeUTF("ERROR Invalid file size");
                         continue;
                     }
 
-                    String afterCommand = message.substring(7);
-                    int lastSpace = afterCommand.lastIndexOf(" ");
-
-                    String filePath = afterCommand.substring(0, lastSpace);
-                    long fileSize = Long.parseLong(afterCommand.substring(lastSpace + 1).trim());
+                    // FIX: enforce upload size limit
+                    if (fileSize > MAX_UPLOAD_SIZE) {
+                        out.writeUTF("ERROR File too large (max 500MB)");
+                        continue;
+                    }
 
                     File destFile = resolvePath(filePath);
-                    if (destFile == null) {
-                        out.writeUTF("ERROR Invalid path");
-                        continue;
-                    }
+                    if (destFile == null) { out.writeUTF("ERROR Invalid path"); continue; }
 
                     destFile.getParentFile().mkdirs();
-
-                    byte[] buffer = new byte[4096];
-                    long remaining = fileSize;
-
-                    try (FileOutputStream fos = new FileOutputStream(destFile)) {
-                        while (remaining > 0) {
-                            int read = in.read(buffer, 0, (int) Math.min(buffer.length, remaining));
-                            fos.write(buffer, 0, read);
-                            remaining -= read;
-                        }
-                    }
-
->>>>>>> c27a6655e5de88921119c7712422b73459209595
+                    receiveFile(in, destFile, fileSize);
                     out.writeUTF("UPLOAD_SUCCESS");
                     System.out.println("File saved: " + destFile.getPath());
 
-                } else if (message.startsWith("DOWNLOADGROUP")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("DOWNLOADGROUP ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String content = message.substring(14).trim();
+                    String content = message.substring("DOWNLOADGROUP ".length()).trim();
                     String[] parts = content.split("\\|", 2);
-                    if (parts.length < 2) {
-                        out.writeUTF("ERROR Invalid command");
-                        continue;
-                    }
+                    if (parts.length < 2) { out.writeUTF("ERROR Invalid command"); continue; }
 
                     String groupId = parts[0].trim();
                     String filePath = parts[1].trim();
 
-                    if (!GroupManager.groupExists(groupId)) {
-                        out.writeUTF("ERROR Group not found");
-                        continue;
-                    }
-
-                    if (!GroupManager.isMember(groupId, loggedInUser)) {
-                        out.writeUTF("ERROR Not authorized");
-                        continue;
-                    }
+                    if (!GroupManager.groupExists(groupId)) { out.writeUTF("ERROR Group not found"); continue; }
+                    if (!GroupManager.isMember(groupId, loggedInUser)) { out.writeUTF("ERROR Not authorized"); continue; }
 
                     File file = resolveGroupPath(groupId, filePath);
                     if (file == null || !file.exists() || file.isDirectory()) {
@@ -526,69 +414,35 @@ public class ClientHandler extends Thread {
                         continue;
                     }
 
-                    out.writeUTF("OK " + file.length());
-
-                    byte[] buffer = new byte[4096];
-                    try (FileInputStream fis = new FileInputStream(file)) {
-                        int bytesRead;
-                        while ((bytesRead = fis.read(buffer)) != -1) {
-                            out.write(buffer, 0, bytesRead);
-                        }
-                    }
-                    out.flush();
+                    sendFile(out, file);
                     System.out.println("Group file sent: " + file.getPath());
 
-                } else if (message.startsWith("DOWNLOAD")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("DOWNLOAD ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String filePath = message.substring(9).trim();
+                    String filePath = message.substring("DOWNLOAD ".length()).trim();
                     File file = resolvePath(filePath);
 
-                    if (file == null || !file.exists()) {
+                    if (file == null || !file.exists() || file.isDirectory()) {
                         out.writeUTF("ERROR File not found");
                         continue;
                     }
 
-                    out.writeUTF("OK " + file.length());
-
-                    byte[] buffer = new byte[4096];
-                    try (FileInputStream fis = new FileInputStream(file)) {
-                        int bytesRead;
-                        while ((bytesRead = fis.read(buffer)) != -1) {
-                            out.write(buffer, 0, bytesRead);
-                        }
-                    }
-                    out.flush();
+                    sendFile(out, file);
                     System.out.println("File sent: " + file.getPath());
 
-                } else if (message.startsWith("DELETEGROUPFILE")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("DELETEGROUPFILE ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String content = message.substring(15).trim();
+                    String content = message.substring("DELETEGROUPFILE ".length()).trim();
                     String[] parts = content.split("\\|", 2);
-                    if (parts.length < 2) {
-                        out.writeUTF("ERROR Invalid command");
-                        continue;
-                    }
+                    if (parts.length < 2) { out.writeUTF("ERROR Invalid command"); continue; }
 
                     String groupId = parts[0].trim();
                     String filePath = parts[1].trim();
 
-                    if (!GroupManager.groupExists(groupId)) {
-                        out.writeUTF("ERROR Group not found");
-                        continue;
-                    }
-
-                    if (!GroupManager.isMember(groupId, loggedInUser)) {
-                        out.writeUTF("ERROR Not authorized");
-                        continue;
-                    }
+                    if (!GroupManager.groupExists(groupId)) { out.writeUTF("ERROR Group not found"); continue; }
+                    if (!GroupManager.isMember(groupId, loggedInUser)) { out.writeUTF("ERROR Not authorized"); continue; }
 
                     File file = resolveGroupPath(groupId, filePath);
                     if (file == null || !file.exists() || file.isDirectory()) {
@@ -602,16 +456,13 @@ public class ClientHandler extends Thread {
                         out.writeUTF("ERROR Could not delete file");
                     }
 
-                } else if (message.startsWith("DELETE")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("DELETE ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String filePath = message.substring(7).trim();
+                    String filePath = message.substring("DELETE ".length()).trim();
                     File file = resolvePath(filePath);
 
-                    if (file == null || !file.exists()) {
+                    if (file == null || !file.exists() || file.isDirectory()) {
                         out.writeUTF("ERROR File not found");
                         continue;
                     }
@@ -619,7 +470,10 @@ public class ClientHandler extends Thread {
                     File recycleDir = new File(getUserRoot(), ".recycle");
                     recycleDir.mkdirs();
 
-                    String recycleName = filePath.replace("/", "__") + "##" + file.getName();
+                    // FIX: use UUID suffix to prevent recycle bin name collisions
+                    String safeBase = filePath.replace("/", "__").replace("\\", "__");
+                    String recycleName = safeBase + "##" + file.getName() + "##" +
+                            java.util.UUID.randomUUID().toString().substring(0, 8);
                     File recycleFile = new File(recycleDir, recycleName);
 
                     if (file.renameTo(recycleFile)) {
@@ -629,26 +483,18 @@ public class ClientHandler extends Thread {
                         out.writeUTF("ERROR Could not delete file");
                     }
 
-                } else if (message.startsWith("SHARE")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("SHARE ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String content = message.substring(6).trim();
-                    String[] parts = content.split("\\|");
+                    String content = message.substring("SHARE ".length()).trim();
+                    String[] parts = content.split("\\|", 2);
+                    if (parts.length < 2) { out.writeUTF("ERROR Invalid command"); continue; }
+
                     String targetUser = parts[0].trim();
                     String filePath = parts[1].trim();
 
-                    if (!AuthService.userExists(targetUser)) {
-                        out.writeUTF("ERROR User not found");
-                        continue;
-                    }
-
-                    if (targetUser.equals(loggedInUser)) {
-                        out.writeUTF("ERROR Cannot share with yourself");
-                        continue;
-                    }
+                    if (!AuthService.userExists(targetUser)) { out.writeUTF("ERROR User not found"); continue; }
+                    if (targetUser.equals(loggedInUser)) { out.writeUTF("ERROR Cannot share with yourself"); continue; }
 
                     File file = resolvePath(filePath);
                     if (file == null || !file.exists() || file.isDirectory()) {
@@ -656,91 +502,67 @@ public class ClientHandler extends Thread {
                         continue;
                     }
 
-<<<<<<< HEAD
-                    // Format: sharedBy|targetUser|ownerFilePath|filename
                     String shareRecord = loggedInUser + "|" + targetUser + "|" +
                             filePath + "|" + file.getName();
-=======
-                    String shareRecord = loggedInUser + "|" + targetUser + "|" + filePath + "|" + file.getName();
->>>>>>> c27a6655e5de88921119c7712422b73459209595
 
-                    try (PrintWriter writer = new PrintWriter(new FileWriter("shared_files.txt", true))) {
-                        writer.println(shareRecord);
+                    synchronized (SHARED_FILES_LOCK) {
+                        try (PrintWriter writer = new PrintWriter(new FileWriter("shared_files.txt", true))) {
+                            writer.println(shareRecord);
+                        }
                     }
 
                     out.writeUTF("SHARE_SUCCESS");
                     System.out.println(loggedInUser + " shared " + filePath + " with " + targetUser);
 
-                } else if (message.startsWith("UNSHARE")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("UNSHARE ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String content = message.substring(8).trim();
-                    String[] parts = content.split("\\|");
+                    String content = message.substring("UNSHARE ".length()).trim();
+                    String[] parts = content.split("\\|", 2);
+                    if (parts.length < 2) { out.writeUTF("ERROR Invalid command"); continue; }
+
                     String targetUser = parts[0].trim();
                     String filePath = parts[1].trim();
 
-                    File sharedFile = new File("shared_files.txt");
-                    if (!sharedFile.exists()) {
-                        out.writeUTF("ERROR No shares found");
-                        continue;
-                    }
+                    synchronized (SHARED_FILES_LOCK) {
+                        File sharedFile = new File("shared_files.txt");
+                        if (!sharedFile.exists()) { out.writeUTF("ERROR No shares found"); continue; }
 
-<<<<<<< HEAD
-                    List<String> lines = new java.util.ArrayList<>();
-=======
-                    List<String> lines = new ArrayList<>();
->>>>>>> c27a6655e5de88921119c7712422b73459209595
-                    try (BufferedReader reader = new BufferedReader(new FileReader(sharedFile))) {
-                        String line;
-                        while ((line = reader.readLine()) != null) {
-                            String[] r = line.split("\\|");
-<<<<<<< HEAD
-                            if (!(r[0].equals(loggedInUser) &&
-                                    r[1].equals(targetUser) &&
-                                    r[2].equals(filePath))) {
-=======
-                            if (!(r[0].equals(loggedInUser) && r[1].equals(targetUser) && r[2].equals(filePath))) {
->>>>>>> c27a6655e5de88921119c7712422b73459209595
-                                lines.add(line);
+                        List<String> lines = new ArrayList<>();
+                        try (BufferedReader reader = new BufferedReader(new FileReader(sharedFile))) {
+                            String line;
+                            while ((line = reader.readLine()) != null) {
+                                String[] r = line.split("\\|", 4);
+                                if (!(r.length >= 3 && r[0].equals(loggedInUser) &&
+                                        r[1].equals(targetUser) && r[2].equals(filePath))) {
+                                    lines.add(line);
+                                }
                             }
                         }
-                    }
 
-                    try (PrintWriter writer = new PrintWriter(new FileWriter(sharedFile, false))) {
-                        for (String line : lines) writer.println(line);
+                        try (PrintWriter writer = new PrintWriter(new FileWriter(sharedFile, false))) {
+                            for (String line : lines) writer.println(line);
+                        }
                     }
                     out.writeUTF("UNSHARE_SUCCESS");
 
                 } else if (message.startsWith("LISTSHARED")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                    if (!isLoggedIn(out)) continue;
 
                     File sharedFile = new File("shared_files.txt");
-                    if (!sharedFile.exists()) {
-                        out.writeUTF("EMPTY");
-                        continue;
-                    }
+                    if (!sharedFile.exists()) { out.writeUTF("EMPTY"); continue; }
 
                     StringBuilder sb = new StringBuilder();
-                    try (BufferedReader reader = new BufferedReader(new FileReader(sharedFile))) {
-                        String line;
-                        while ((line = reader.readLine()) != null) {
-                            String[] r = line.split("\\|");
-<<<<<<< HEAD
-                            // r[0]=sharedBy, r[1]=targetUser, r[2]=filePath, r[3]=filename
-                            if (r.length >= 4 && r[1].equals(loggedInUser)) {
-                                sb.append(r[0]).append("|")  // who shared
-                                        .append(r[2]).append("|")  // file path in owner's folder
-                                        .append(r[3]).append(","); // filename
-=======
-                            if (r[1].equals(loggedInUser)) {
-                                sb.append(r[0]).append("|").append(r[2]).append("|").append(r[3]).append(",");
->>>>>>> c27a6655e5de88921119c7712422b73459209595
+                    synchronized (SHARED_FILES_LOCK) {
+                        try (BufferedReader reader = new BufferedReader(new FileReader(sharedFile))) {
+                            String line;
+                            while ((line = reader.readLine()) != null) {
+                                String[] r = line.split("\\|", 4);
+                                if (r.length >= 4 && r[1].equals(loggedInUser)) {
+                                    sb.append(r[0]).append("|")
+                                            .append(r[2]).append("|")
+                                            .append(r[3]).append(",");
+                                }
                             }
                         }
                     }
@@ -749,177 +571,105 @@ public class ClientHandler extends Thread {
                     if (result.endsWith(",")) result = result.substring(0, result.length() - 1);
                     out.writeUTF(result.isEmpty() ? "EMPTY" : result);
 
-                } else if (message.startsWith("DOWNLOADSHARED")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("DOWNLOADSHARED ")) {
+                    if (!isLoggedIn(out)) continue;
 
-<<<<<<< HEAD
-                    // FORMAT: DOWNLOADSHARED ownerUsername|filePath
-                    String content = message.substring(14).trim();
-=======
-                    String content = message.substring(15).trim();
->>>>>>> c27a6655e5de88921119c7712422b73459209595
-                    String[] parts = content.split("\\|");
+                    // FIX: use correct command length
+                    String content = message.substring("DOWNLOADSHARED ".length()).trim();
+                    String[] parts = content.split("\\|", 2);
 
-                    if (parts.length < 2) {
-                        out.writeUTF("ERROR Invalid request");
-                        continue;
-                    }
+                    if (parts.length < 2) { out.writeUTF("ERROR Invalid request"); continue; }
 
                     String ownerUsername = parts[0].trim();
                     String filePath = parts[1].trim();
 
-<<<<<<< HEAD
                     System.out.println("=== DOWNLOADSHARED ===");
                     System.out.println("Owner: " + ownerUsername);
-                    System.out.println("FilePath from client: " + filePath);
-                    System.out.println("Requested by: " + loggedInUser);
+                    System.out.println("FilePath: " + filePath);
+                    System.out.println("RequestedBy: " + loggedInUser);
 
-                    // Read shared_files.txt and print all records
-=======
->>>>>>> c27a6655e5de88921119c7712422b73459209595
                     File sharedTxt = new File("shared_files.txt");
                     boolean authorized = false;
                     String authorizedPath = null;
 
-                    if (sharedTxt.exists()) {
-                        try (BufferedReader reader = new BufferedReader(new FileReader(sharedTxt))) {
-                            String line;
-                            while ((line = reader.readLine()) != null) {
-                                if (line.trim().isEmpty()) continue;
-                                System.out.println("  Checking record: [" + line + "]");
-                                String[] r = line.split("\\|");
-<<<<<<< HEAD
-                                if (r.length < 3) continue;
+                    synchronized (SHARED_FILES_LOCK) {
+                        if (sharedTxt.exists()) {
+                            try (BufferedReader reader = new BufferedReader(new FileReader(sharedTxt))) {
+                                String line;
+                                while ((line = reader.readLine()) != null) {
+                                    if (line.trim().isEmpty()) continue;
+                                    String[] r = line.split("\\|", 4);
+                                    if (r.length < 3) continue;
 
-                                String storedOwner = r[0].trim();
-                                String storedTarget = r[1].trim();
-                                String storedPath = r[2].trim();
+                                    String storedOwner = r[0].trim();
+                                    String storedTarget = r[1].trim();
+                                    String storedPath = r[2].trim();
 
-                                // Extract just the filename from stored path and requested path
-                                String storedFilename = storedPath.contains("/") ?
-                                        storedPath.substring(storedPath.lastIndexOf("/") + 1) :
-                                        storedPath;
-                                String requestedFilename = filePath.contains("/") ?
-                                        filePath.substring(filePath.lastIndexOf("/") + 1) :
-                                        filePath;
+                                    String storedFilename = storedPath.contains("/") ?
+                                            storedPath.substring(storedPath.lastIndexOf("/") + 1) : storedPath;
+                                    String requestedFilename = filePath.contains("/") ?
+                                            filePath.substring(filePath.lastIndexOf("/") + 1) : filePath;
 
-                                System.out.println("    storedOwner=[" + storedOwner + "] ownerUsername=[" + ownerUsername + "] match=" + storedOwner.equals(ownerUsername));
-                                System.out.println("    storedTarget=[" + storedTarget + "] loggedIn=[" + loggedInUser + "] match=" + storedTarget.equals(loggedInUser));
-                                System.out.println("    storedPath=[" + storedPath + "] filePath=[" + filePath + "] match=" + storedPath.equals(filePath));
-                                System.out.println("    storedFilename=[" + storedFilename + "] requestedFilename=[" + requestedFilename + "] match=" + storedFilename.equals(requestedFilename));
-
-                                if (storedOwner.equals(ownerUsername) &&
-                                        storedTarget.equals(loggedInUser) &&
-                                        (storedPath.equals(filePath) ||
-                                                storedFilename.equals(requestedFilename))) {
-=======
-                                if (r[0].equals(ownerUsername) && r[1].equals(loggedInUser) && r[2].equals(filePath)) {
->>>>>>> c27a6655e5de88921119c7712422b73459209595
-                                    authorized = true;
-                                    authorizedPath = storedPath;
-                                    System.out.println("  ✅ AUTHORIZED! Using path: " + authorizedPath);
-                                    break;
+                                    if (storedOwner.equals(ownerUsername) &&
+                                            storedTarget.equals(loggedInUser) &&
+                                            (storedPath.equals(filePath) || storedFilename.equals(requestedFilename))) {
+                                        authorized = true;
+                                        authorizedPath = storedPath;
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    } else {
-                        System.out.println("shared_files.txt does not exist!");
                     }
 
                     if (!authorized) {
-                        System.out.println("❌ Not authorized");
+                        System.out.println("Not authorized for shared download");
                         out.writeUTF("ERROR Not authorized");
                         continue;
                     }
 
+                    // Resolve file safely within owner's folder
                     File ownerRoot = new File(BASE_DIR + "/" + ownerUsername);
-                    File file = new File(ownerRoot, authorizedPath);
-
-                    System.out.println("Looking for file at: " + file.getAbsolutePath());
-                    System.out.println("File exists: " + file.exists());
-
-                    System.out.println("ownerRoot absolute: " + ownerRoot.getAbsolutePath());
-                    System.out.println("authorizedPath: " + authorizedPath);
-                    System.out.println("file absolute: " + file.getAbsolutePath());
-                    System.out.println("file exists: " + file.exists());
-
-// list all files in owner root
-                    File[] allFiles = ownerRoot.listFiles();
-                    if (allFiles != null) {
-                        System.out.println("Files in owner root:");
-                        for (File f : allFiles) {
-                            System.out.println("  " + f.getName());
+                    File file;
+                    try {
+                        file = new File(ownerRoot, authorizedPath).getCanonicalFile();
+                        if (!file.getPath().startsWith(ownerRoot.getCanonicalPath())) {
+                            out.writeUTF("ERROR Invalid path");
+                            continue;
                         }
+                    } catch (IOException e) {
+                        out.writeUTF("ERROR Invalid path");
+                        continue;
                     }
 
-                    if (!file.exists()) {
+                    if (!file.exists() || file.isDirectory()) {
                         out.writeUTF("ERROR File not found");
                         continue;
                     }
 
-                    out.writeUTF("OK " + file.length());
-
-                    byte[] buffer = new byte[4096];
-                    try (FileInputStream fis = new FileInputStream(file)) {
-                        int bytesRead;
-                        while ((bytesRead = fis.read(buffer)) != -1) {
-                            out.write(buffer, 0, bytesRead);
-                        }
-                    }
-                    out.flush();
-<<<<<<< HEAD
-                    System.out.println("✅ Shared file sent: " + file.getPath());
-
-                } else {
-                    out.writeUTF(loggedInUser == null ?
-                            "Please login first." : "Unknown command.");
-=======
+                    sendFile(out, file);
                     System.out.println("Shared file sent: " + file.getPath());
 
-                } else if (message.startsWith("CREATEGROUP")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("CREATEGROUP ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String groupName = message.substring(12).trim();
+                    String groupName = message.substring("CREATEGROUP ".length()).trim();
                     String result = GroupManager.createGroup(loggedInUser, groupName);
                     out.writeUTF(result);
 
-                } else if (message.startsWith("ADDGROUPMEMBER")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("ADDGROUPMEMBER ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String content = message.substring(15).trim();
-                    String[] parts = content.split("\\|");
-
-                    if (parts.length < 2) {
-                        out.writeUTF("ERROR Invalid command");
-                        continue;
-                    }
+                    String content = message.substring("ADDGROUPMEMBER ".length()).trim();
+                    String[] parts = content.split("\\|", 2);
+                    if (parts.length < 2) { out.writeUTF("ERROR Invalid command"); continue; }
 
                     String groupId = parts[0].trim();
                     String username = parts[1].trim();
 
-                    if (!GroupManager.groupExists(groupId)) {
-                        out.writeUTF("ERROR Group not found");
-                        continue;
-                    }
-
-                    if (!GroupManager.isOwner(groupId, loggedInUser)) {
-                        out.writeUTF("ERROR Only group owner can add members");
-                        continue;
-                    }
-
-                    if (!AuthService.userExists(username)) {
-                        out.writeUTF("ERROR User not found");
-                        continue;
-                    }
+                    if (!GroupManager.groupExists(groupId)) { out.writeUTF("ERROR Group not found"); continue; }
+                    if (!GroupManager.isOwner(groupId, loggedInUser)) { out.writeUTF("ERROR Only group owner can add members"); continue; }
+                    if (!AuthService.userExists(username)) { out.writeUTF("ERROR User not found"); continue; }
 
                     if (GroupManager.addMember(groupId, username)) {
                         out.writeUTF("ADDGROUPMEMBER_SUCCESS");
@@ -928,97 +678,119 @@ public class ClientHandler extends Thread {
                     }
 
                 } else if (message.startsWith("LISTGROUPS")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                    if (!isLoggedIn(out)) continue;
 
                     List<GroupManager.GroupInfo> groups = GroupManager.getUserGroups(loggedInUser);
-                    if (groups.isEmpty()) {
-                        out.writeUTF("EMPTY");
-                        continue;
-                    }
+                    if (groups.isEmpty()) { out.writeUTF("EMPTY"); continue; }
 
                     StringBuilder sb = new StringBuilder();
                     for (GroupManager.GroupInfo g : groups) {
-                        sb.append(g.groupId)
-                                .append("|")
-                                .append(g.groupName)
-                                .append("|")
-                                .append(g.owner)
-                                .append(",");
+                        sb.append(g.groupId).append("|")
+                                .append(g.groupName).append("|")
+                                .append(g.owner).append(",");
                     }
-
                     String result = sb.toString();
-                    if (result.endsWith(",")) {
-                        result = result.substring(0, result.length() - 1);
-                    }
+                    if (result.endsWith(",")) result = result.substring(0, result.length() - 1);
                     out.writeUTF(result);
 
-                } else if (message.startsWith("LISTGROUPFILES")) {
-                    if (loggedInUser == null) {
-                        out.writeUTF("ERROR Not logged in");
-                        continue;
-                    }
+                } else if (message.startsWith("LISTGROUPFILES ")) {
+                    if (!isLoggedIn(out)) continue;
 
-                    String content = message.substring(15).trim();
+                    String content = message.substring("LISTGROUPFILES ".length()).trim();
                     String[] parts = content.split("\\|", 2);
 
                     String groupId = parts[0].trim();
                     String relativePath = parts.length > 1 ? parts[1].trim() : "";
 
-                    if (!GroupManager.groupExists(groupId)) {
-                        out.writeUTF("ERROR Group not found");
-                        continue;
-                    }
-
-                    if (!GroupManager.isMember(groupId, loggedInUser)) {
-                        out.writeUTF("ERROR Not authorized");
-                        continue;
-                    }
+                    if (!GroupManager.groupExists(groupId)) { out.writeUTF("ERROR Group not found"); continue; }
+                    if (!GroupManager.isMember(groupId, loggedInUser)) { out.writeUTF("ERROR Not authorized"); continue; }
 
                     File dir = resolveGroupPath(groupId, relativePath);
-
                     if (dir == null || !dir.exists() || !dir.isDirectory()) {
                         out.writeUTF("ERROR Directory not found");
                         continue;
                     }
 
-                    StringBuilder sb = new StringBuilder();
-                    File[] contents = dir.listFiles();
-
-                    if (contents != null) {
-                        for (File f : contents) {
-                            String size = f.isDirectory() ? "—" : formatSize(f.length());
-                            String date = new SimpleDateFormat("dd MMM yyyy HH:mm")
-                                    .format(new Date(f.lastModified()));
-
-                            if (f.isDirectory()) {
-                                sb.append("DIR:").append(f.getName())
-                                        .append(":—:").append(date).append(",");
-                            } else {
-                                sb.append("FILE:").append(f.getName())
-                                        .append(":").append(size)
-                                        .append(":").append(date).append(",");
-                            }
-                        }
-                    }
-
-                    String result = sb.toString();
-                    if (result.endsWith(",")) {
-                        result = result.substring(0, result.length() - 1);
-                    }
-                    out.writeUTF(result.isEmpty() ? "EMPTY" : result);
+                    out.writeUTF(buildFileListResponse(dir, false));
 
                 } else {
                     out.writeUTF(loggedInUser == null ? "Please login first." : "Unknown command.");
->>>>>>> c27a6655e5de88921119c7712422b73459209595
                 }
             }
 
         } catch (Exception e) {
             System.out.println("Client disconnected: " + e.getMessage());
+        } finally {
+            try { socket.close(); } catch (IOException ignored) {}
         }
+    }
+
+    // ===== HELPERS =====
+
+    private boolean isLoggedIn(DataOutputStream out) throws IOException {
+        if (loggedInUser == null) {
+            out.writeUTF("ERROR Not logged in");
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isAdmin(DataOutputStream out) throws IOException {
+        if (loggedInUser == null || !loggedInUser.equals("admin")) {
+            out.writeUTF("ERROR Unauthorized");
+            return false;
+        }
+        return true;
+    }
+
+    private void receiveFile(DataInputStream in, File destFile, long fileSize) throws IOException {
+        byte[] buffer = new byte[4096];
+        long remaining = fileSize;
+        try (FileOutputStream fos = new FileOutputStream(destFile)) {
+            while (remaining > 0) {
+                int read = in.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+                if (read == -1) break;
+                fos.write(buffer, 0, read);
+                remaining -= read;
+            }
+        }
+    }
+
+    private void sendFile(DataOutputStream out, File file) throws IOException {
+        out.writeUTF("OK " + file.length());
+        byte[] buffer = new byte[4096];
+        try (FileInputStream fis = new FileInputStream(file)) {
+            int bytesRead;
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                out.write(buffer, 0, bytesRead);
+            }
+        }
+        out.flush();
+    }
+
+    private String buildFileListResponse(File dir, boolean skipSpecial) {
+        StringBuilder sb = new StringBuilder();
+        File[] contents = dir.listFiles();
+        if (contents != null) {
+            for (File f : contents) {
+                if (skipSpecial && (f.getName().equals(".recycle") || f.getName().equals("groups"))) continue;
+                String date = new SimpleDateFormat("dd MMM yyyy HH:mm")
+                        .format(new Date(f.lastModified()));
+                if (f.isDirectory()) {
+                    long folderSize = getFolderSize(f);
+                    sb.append("DIR:").append(f.getName())
+                            .append(":").append(formatSize(folderSize))
+                            .append(":").append(date).append(",");
+                } else {
+                    sb.append("FILE:").append(f.getName())
+                            .append(":").append(formatSize(f.length()))
+                            .append(":").append(date).append(",");
+                }
+            }
+        }
+        String result = sb.toString();
+        if (result.endsWith(",")) result = result.substring(0, result.length() - 1);
+        return result.isEmpty() ? "EMPTY" : result;
     }
 
     private boolean deleteRecursive(File file) {
@@ -1047,11 +819,7 @@ public class ClientHandler extends Thread {
     private String formatSize(long bytes) {
         if (bytes < 1024) return bytes + " B";
         else if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-<<<<<<< HEAD
-        else if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
-=======
         else if (bytes < 1024L * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024));
->>>>>>> c27a6655e5de88921119c7712422b73459209595
         else return String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024));
     }
 }
