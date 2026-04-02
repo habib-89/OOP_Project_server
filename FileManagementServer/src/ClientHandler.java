@@ -713,6 +713,74 @@ public class ClientHandler extends Thread {
 
                     out.writeUTF(buildFileListResponse(dir, false));
 
+
+                } else if (message.startsWith("UPLOAD_PROFILE ")) {
+                    if (!isLoggedIn(out)) continue;
+
+                    long fileSize;
+                    try {
+                        fileSize = Long.parseLong(message.substring("UPLOAD_PROFILE ".length()).trim());
+                    } catch (NumberFormatException e) {
+                        out.writeUTF("ERROR Invalid file size");
+                        continue;
+                    }
+
+                    if (fileSize > MAX_UPLOAD_SIZE) {
+                        out.writeUTF("ERROR File too large (max 500MB)");
+                        continue;
+                    }
+
+                    File profileDir = new File(BASE_DIR + "/profile_pics");
+                    profileDir.mkdirs();
+
+                    File destFile = new File(profileDir, loggedInUser + ".png");
+                    receiveFile(in, destFile, fileSize);
+                    out.writeUTF("UPLOAD_PROFILE_SUCCESS");
+
+                } else if (message.startsWith("DOWNLOAD_PROFILE")) {
+                    if (!isLoggedIn(out)) continue;
+
+                    File file = new File(BASE_DIR + "/profile_pics/" + loggedInUser + ".png");
+                    if (!file.exists() || file.isDirectory()) {
+                        out.writeUTF("ERROR No profile picture");
+                        continue;
+                    }
+
+                    sendFile(out, file);
+
+                } else if (message.startsWith("UPLOAD_PROFILE_STYLE ")) {
+                    if (!isLoggedIn(out)) continue;
+
+                    String style = message.substring("UPLOAD_PROFILE_STYLE ".length()).trim();
+                    if (style.isEmpty()) {
+                        out.writeUTF("ERROR Invalid style");
+                        continue;
+                    }
+
+                    File profileDir = new File(BASE_DIR + "/profile_pics");
+                    profileDir.mkdirs();
+
+                    File styleFile = new File(profileDir, loggedInUser + ".style.txt");
+                    try (PrintWriter writer = new PrintWriter(new FileWriter(styleFile))) {
+                        writer.println(style);
+                    }
+
+                    out.writeUTF("UPLOAD_PROFILE_STYLE_SUCCESS");
+
+                } else if (message.startsWith("DOWNLOAD_PROFILE_STYLE")) {
+                    if (!isLoggedIn(out)) continue;
+
+                    File styleFile = new File(BASE_DIR + "/profile_pics/" + loggedInUser + ".style.txt");
+                    if (!styleFile.exists() || styleFile.isDirectory()) {
+                        out.writeUTF("STYLE_DEFAULT");
+                        continue;
+                    }
+
+                    try (BufferedReader reader = new BufferedReader(new FileReader(styleFile))) {
+                        String style = reader.readLine();
+                        out.writeUTF(style == null || style.trim().isEmpty() ? "STYLE_DEFAULT" : style.trim());
+                    }
+
                 } else {
                     out.writeUTF(loggedInUser == null ? "Please login first." : "Unknown command.");
                 }
