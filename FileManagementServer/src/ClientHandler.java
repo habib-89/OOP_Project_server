@@ -817,6 +817,34 @@ public class ClientHandler extends Thread {
                     if (result.endsWith(";;")) result = result.substring(0, result.length() - 2);
                     out.writeUTF(result.isEmpty() ? "EMPTY" : result);
 
+
+                } else if (message.startsWith("UPLOAD_PROFILE ")) {
+                    if (!isLoggedIn(out)) continue;
+
+                    long fileSize;
+                    try {
+                        fileSize = Long.parseLong(message.split(" ")[1]);
+                    } catch (Exception e) {
+                        out.writeUTF("ERROR Invalid size");
+                        continue;
+                    }
+
+                    if (fileSize > 5 * 1024 * 1024) {
+                        out.writeUTF("ERROR Profile too large");
+                        continue;
+                    }
+
+                    File dir = new File(BASE_DIR + "/profile_pics");
+                    dir.mkdirs();
+
+                    File file = new File(dir, loggedInUser + ".png");
+
+                    receiveFile(in, file, fileSize);
+
+                    out.writeUTF("UPLOAD_PROFILE_SUCCESS");
+
+                    System.out.println("Profile uploaded for: " + loggedInUser);
+
                 } else if (message.startsWith("DOWNLOAD_PROFILE")) {
                     if (!isLoggedIn(out)) continue;
 
