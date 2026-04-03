@@ -19,11 +19,9 @@ public class ClientHandler extends Thread {
 
     // Lock for shared_files.txt concurrent access
     private static final Object SHARED_FILES_LOCK = new Object();
-
-    // Live discussion subscriptions: key = groupId|fileName
-    private static final Map<String, Set<ClientHandler>> DISCUSSION_SUBSCRIBERS = new ConcurrentHashMap<>();
-    private final Object outLock = new Object();
-    private volatile String subscribedDiscussionKey = null;
+    private static final Map<String, Set<ClientHandler>> GROUP_DISCUSSION_SUBSCRIBERS = new ConcurrentHashMap<>();
+    private final Object pushLock = new Object();
+    private volatile String subscribedGroupId = null;
 
     public ClientHandler(Socket socket) {
         this.socket = socket;
@@ -759,7 +757,7 @@ public class ClientHandler extends Thread {
                     }
 
                     out.writeUTF("SETFILEDESCRIPTION_SUCCESS");
-                    broadcastDiscussionUpdate(groupId, fileName);
+                    broadcastGroupDiscussionUpdate(groupId, fileName);
 
                 } else if (message.startsWith("ADDCOMMENT ")) {
                     if (!isLoggedIn(out)) continue;
@@ -792,7 +790,7 @@ public class ClientHandler extends Thread {
                     }
 
                     out.writeUTF("COMMENT_SUCCESS");
-                    broadcastDiscussionUpdate(groupId, fileName);
+                    broadcastGroupDiscussionUpdate(groupId, fileName);
 
                 } else if (message.startsWith("GETFILEDISCUSSION ")) {
                     if (!isLoggedIn(out)) continue;
@@ -829,27 +827,26 @@ public class ClientHandler extends Thread {
 
 
 
-                } else if (message.startsWith("SUBSCRIBE_DISCUSSION ")) {
+                } else if (message.startsWith("SUBSCRIBE_GROUP_DISCUSSION ")) {
                     if (!isLoggedIn(out)) continue;
 
-                    String[] parts = message.substring("SUBSCRIBE_DISCUSSION ".length()).split("\\|", 2);
-                    if (parts.length < 2) {
-                        out.writeUTF("ERROR Invalid command");
+                    String groupId = message.substring("SUBSCRIBE_GROUP_DISCUSSION ".length()).trim();
+
+                    if (!GroupManager.groupExists(groupId)) {
+                        out.writeUTF("ERROR Group not found");
+                        continue;
+                    }
+                    if (!GroupManager.isMember(groupId, loggedInUser)) {
+                        out.writeUTF("ERROR Not authorized");
                         continue;
                     }
 
-                    String groupId = parts[0].trim();
-                    String fileName = parts[1].trim();
-
-                    if (!GroupManager.groupExists(groupId)) { out.writeUTF("ERROR Group not found"); continue; }
-                    if (!GroupManager.isMember(groupId, loggedInUser)) { out.writeUTF("ERROR Not authorized"); continue; }
-
-                    subscribeDiscussion(groupId, fileName);
+                    subscribeGroupDiscussion(groupId);
                     out.writeUTF("SUBSCRIBE_SUCCESS");
 
-                } else if (message.equals("UNSUBSCRIBE_DISCUSSION")) {
+                } else if (message.equals("UNSUBSCRIBE_GROUP_DISCUSSION")) {
                     if (!isLoggedIn(out)) continue;
-                    unsubscribeDiscussion();
+                    unsubscribeGroupDiscussion();
                     out.writeUTF("UNSUBSCRIBE_SUCCESS");
 
                 } else if (message.startsWith("UPLOAD_PROFILE ")) {
@@ -898,56 +895,51 @@ public class ClientHandler extends Thread {
         } catch (Exception e) {
             System.out.println("Client disconnected: " + e.getMessage());
         } finally {
-            unsubscribeDiscussion();
+            unsubscribeGroupDiscussion();
             try { socket.close(); } catch (IOException ignored) {}
         }
     }
 
 
-    private String discussionKey(String groupId, String fileName) {
-        return groupId + "|" + fileName;
-    }
-
-    private void subscribeDiscussion(String groupId, String fileName) {
-        unsubscribeDiscussion();
-        String key = discussionKey(groupId, fileName);
-        DISCUSSION_SUBSCRIBERS
-                .computeIfAbsent(key, k -> ConcurrentHashMap.newKeySet())
+    private void subscribeGroupDiscussion(String groupId) {
+        unsubscribeGroupDiscussion();
+        GROUP_DISCUSSION_SUBSCRIBERS
+                .computeIfAbsent(groupId, g -> ConcurrentHashMap.newKeySet())
                 .add(this);
-        subscribedDiscussionKey = key;
+        subscribedGroupId = groupId;
     }
 
-    private void unsubscribeDiscussion() {
-        if (subscribedDiscussionKey == null) return;
-        Set<ClientHandler> handlers = DISCUSSION_SUBSCRIBERS.get(subscribedDiscussionKey);
-        if (handlers != null) {
-            handlers.remove(this);
-            if (handlers.isEmpty()) {
-                DISCUSSION_SUBSCRIBERS.remove(subscribedDiscussionKey);
+    private void unsubscribeGroupDiscussion() {
+        if (subscribedGroupId == null) return;
+
+        Set<ClientHandler> listeners = GROUP_DISCUSSION_SUBSCRIBERS.get(subscribedGroupId);
+        if (listeners != null) {
+            listeners.remove(this);
+            if (listeners.isEmpty()) {
+                GROUP_DISCUSSION_SUBSCRIBERS.remove(subscribedGroupId);
             }
         }
-        subscribedDiscussionKey = null;
+        subscribedGroupId = null;
     }
 
-    private void broadcastDiscussionUpdate(String groupId, String fileName) {
-        String key = discussionKey(groupId, fileName);
-        Set<ClientHandler> handlers = DISCUSSION_SUBSCRIBERS.get(key);
-        if (handlers == null) return;
+    private void broadcastGroupDiscussionUpdate(String groupId, String fileName) {
+        Set<ClientHandler> listeners = GROUP_DISCUSSION_SUBSCRIBERS.get(groupId);
+        if (listeners == null || listeners.isEmpty()) return;
 
-        for (ClientHandler handler : new ArrayList<>(handlers)) {
-            handler.sendPush("DISCUSSION_UPDATE " + key);
+        for (ClientHandler handler : new ArrayList<>(listeners)) {
+            handler.pushMessage("GROUP_DISCUSSION_UPDATE " + groupId + "|" + fileName);
         }
     }
 
-    private void sendPush(String message) {
+    private void pushMessage(String message) {
         try {
-            synchronized (outLock) {
+            synchronized (pushLock) {
                 DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                 out.writeUTF(message);
                 out.flush();
             }
         } catch (IOException e) {
-            unsubscribeDiscussion();
+            unsubscribeGroupDiscussion();
         }
     }
 
@@ -955,7 +947,7 @@ public class ClientHandler extends Thread {
 
     private boolean isLoggedIn(DataOutputStream out) throws IOException {
         if (loggedInUser == null) {
-            synchronized (outLock) { out.writeUTF("ERROR Not logged in"); out.flush(); }
+            out.writeUTF("ERROR Not logged in");
             return false;
         }
         return true;
@@ -963,7 +955,7 @@ public class ClientHandler extends Thread {
 
     private boolean isAdmin(DataOutputStream out) throws IOException {
         if (loggedInUser == null || !loggedInUser.equals("admin")) {
-            synchronized (outLock) { out.writeUTF("ERROR Unauthorized"); out.flush(); }
+            out.writeUTF("ERROR Unauthorized");
             return false;
         }
         return true;
