@@ -8,7 +8,7 @@ public class ServerMain {
 
     public static void main(String[] args) {
 
-        // Graceful shutdown hook
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             running = false;
             System.out.println("Server shutting down...");
